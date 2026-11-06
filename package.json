@@ -1,0 +1,21 @@
+{
+  "name": "voice-chat",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Text-in, voice-out chatbot for the text vs voice privacy-disclosure study. Browser -> this server -> IU REALLMS (text) and a self-hosted Kokoro model (speech).",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "prefetch-model": "node scripts/prefetch-model.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "@huggingface/transformers": "3.8.1",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "kokoro-js": "1.2.1",
+    "openai": "^4.77.0"
+  }
+}

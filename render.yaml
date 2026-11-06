@@ -1,0 +1,40 @@
+# Render Blueprint. New > Blueprint in the Render dashboard, point it at this repo.
+services:
+  - type: web
+    name: voice-chat
+    runtime: node
+    # Start on free to measure memory (boot log prints "rss N MB" after Kokoro
+    # loads). If the service gets OOM-killed, move to "standard" (2 GB, $25/mo).
+    # "starter" ($7) has the same 512 MB as free, so it does not fix memory.
+    plan: free
+    # Browser voice needs no model, so the build is just npm ci.
+    # TO SWITCH BACK TO KOKORO: set TTS_BACKEND=kokoro below AND change this to
+    #   npm ci && npm run prefetch-model
+    # (downloads the ~90 MB model at build time instead of on first boot).
+    # Kokoro measured ~1.3-4x slower than real time on a laptop CPU, so use
+    # plan: standard or a GPU host before relying on it.
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: LLM_BASE_URL
+        value: https://reallms.rescloud.iu.edu/direct/v1
+      - key: LLM_MODEL
+        value: gpt-oss-120b
+      - key: LLM_REASONING_EFFORT
+        value: low
+      - key: LLM_API_KEY
+        sync: false # set in the dashboard, never in git
+      - key: TTS_BACKEND
+        value: browser # browser | kokoro | openai
+      # Browser voice only: preferred voice name (substring), e.g. Aria, Samantha.
+      # Leave blank for an automatic en-US pick. The page logs which voice played.
+      - key: TTS_BROWSER_VOICE
+        value: ""
+      - key: TTS_VOICE # Kokoro / openai backends only
+        value: af_heart
+      - key: DEFAULT_MODE
+        value: voice

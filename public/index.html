@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Assistant</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1 id="title">Assistant</h1>
+      <span class="spacer"></span>
+      <button id="reset" type="button">New chat</button>
+    </header>
+
+    <div id="log" aria-live="polite">
+      <div class="empty" id="empty">Type a question to get started.</div>
+    </div>
+
+    <form id="form">
+      <textarea
+        id="input"
+        rows="1"
+        placeholder="Type a message…"
+        aria-label="Message"
+        autofocus
+      ></textarea>
+      <button type="submit" id="send">Send</button>
+    </form>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
