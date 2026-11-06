@@ -54,3 +54,13 @@ test("cache is bounded", async () => {
   assert.equal((await tts.synthesize("a")).cached, false); // evicted
   assert.equal((await tts.synthesize("c")).cached, true);
 });
+
+test("cache is bounded by bytes, not just entries", async () => {
+  const engine = { name: "fake", speak: async () => Buffer.alloc(400) };
+  const tts = createTts(cfg({ cacheEntries: 100, cacheBytes: 1000 }), { engine });
+  for (const t of ["a", "b", "c", "d"]) await tts.synthesize(t);
+  const s = tts.status();
+  assert.ok(s.cacheBytes <= 1000, `cache holds ${s.cacheBytes} bytes`);
+  assert.equal(s.cacheEntries, 2);
+  assert.equal((await tts.synthesize("a")).cached, false); // oldest evicted
+});

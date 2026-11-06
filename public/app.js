@@ -14,6 +14,8 @@ const reset = $("reset");
 const empty = $("empty");
 
 const params = new URLSearchParams(location.search);
+// Study link token (?k=...). Only enforced when the server sets STUDY_TOKEN.
+const apiHeaders = { "Content-Type": "application/json", ...(params.get("k") && { "X-Study-Token": params.get("k") }) };
 const serverConfig = await fetch("/api/config")
   .then((r) => r.json())
   .catch(() => ({ defaultMode: "voice", showTranscript: false, title: "Assistant" }));
@@ -146,7 +148,7 @@ function playBrowserChunks(chunks, ui) {
 async function fetchClip(text) {
   const res = await fetch("/api/speak", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: apiHeaders,
     body: JSON.stringify({ text }),
   });
   if (!res.ok) {
@@ -335,7 +337,7 @@ form.addEventListener("submit", async (e) => {
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: apiHeaders,
       body: JSON.stringify({ messages }),
     });
     const data = await res.json().catch(() => ({}));

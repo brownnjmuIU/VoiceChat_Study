@@ -20,6 +20,13 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
+      - key: NODE_ENV
+        value: production # Render does not set this; without it Express leaks stack traces
+      # Optional: set in the dashboard, then hand out links as https://<app>/?mode=voice&k=<token>
+      - key: STUDY_TOKEN
+        sync: false
+      - key: LLM_MAX_TOKENS
+        value: "1024" # public endpoint: cap the cost of every reply
       - key: LLM_BASE_URL
         value: https://reallms.rescloud.iu.edu/direct/v1
       - key: LLM_MODEL

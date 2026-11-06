@@ -33,7 +33,9 @@ export function loadConfig(env = process.env) {
     apiKey: env.LLM_API_KEY,
     model: env.LLM_MODEL ?? (llmMock ? "mock" : undefined),
     timeoutMs: num(env.LLM_TIMEOUT_MS, 60_000),
-    maxTokens: env.LLM_MAX_TOKENS ? num(env.LLM_MAX_TOKENS) : undefined,
+    // Always capped: the endpoint is public, so an uncapped reply is an open
+    // tab on the REALLMS key. Leaves room for gpt-oss reasoning tokens.
+    maxTokens: num(env.LLM_MAX_TOKENS, 1024),
     temperature: env.LLM_TEMPERATURE ? num(env.LLM_TEMPERATURE) : undefined,
     reasoningEffort: env.LLM_REASONING_EFFORT || undefined,
   };
@@ -66,9 +68,12 @@ export function loadConfig(env = process.env) {
     apiKey: env.TTS_API_KEY,
     model: env.TTS_MODEL ?? "kokoro",
     // Limits. One request = one sentence-sized chunk, see speech-text.js.
-    maxChars: num(env.TTS_MAX_CHARS, 600),
+    // /api/chat never produces chunks over 300 chars, so nothing legit is longer.
+    maxChars: num(env.TTS_MAX_CHARS, 300),
     maxQueue: num(env.TTS_MAX_QUEUE, 8),
     cacheEntries: num(env.TTS_CACHE_ENTRIES, 200),
+    // Byte cap too: 200 long WAVs alone would OOM a 512 MB Render box.
+    cacheBytes: num(env.TTS_CACHE_MB, 64) * 1024 * 1024,
   };
   if (backend === "openai" && !tts.baseURL) {
     problems.push("TTS_BASE_URL is required when TTS_BACKEND=openai");
@@ -85,6 +90,12 @@ export function loadConfig(env = process.env) {
 
   return {
     port: num(env.PORT, 3000),
+    security: {
+      // Optional shared token carried in the study link (?k=...). Empty = off.
+      studyToken: env.STUDY_TOKEN ?? "",
+      // Who may embed the page in an iframe (CSP frame-ancestors).
+      frameAncestors: env.FRAME_ANCESTORS ?? "'self' https://*.qualtrics.com",
+    },
     llm,
     tts,
     ui: {

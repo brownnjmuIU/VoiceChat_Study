@@ -1,6 +1,7 @@
 import express from "express";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { timingSafeEqual } from "node:crypto";
 import { describeUpstreamError } from "./llm.js";
 import { TtsBusyError } from "./tts.js";
 import { toSpeakable, splitForSpeech } from "./speech-text.js";
@@ -48,7 +49,11 @@ export function rateLimiter({ limit, windowMs, now = Date.now }) {
     if (!entry || t - entry.start >= windowMs) {
       entry = { start: t, count: 0 };
       hits.set(key, entry);
-      if (hits.size > 10_000) hits.clear(); // bounded memory
+      // Bounded memory: drop only EXPIRED windows. Clearing everything would let
+      // anyone reset every counter by cycling through 10k source addresses.
+      if (hits.size > 10_000) {
+        for (const [k, e] of hits) if (t - e.start >= windowMs) hits.delete(k);
+      }
     }
     if (++entry.count > limit) {
       return res.status(429).json({ error: "Too many requests. Wait a few minutes and try again." });
@@ -57,14 +62,45 @@ export function rateLimiter({ limit, windowMs, now = Date.now }) {
   };
 }
 
+/**
+ * Optional gate: when STUDY_TOKEN is set, /api/chat and /api/speak need the
+ * same value in X-Study-Token (the page copies it from ?k= in the study link).
+ * Not a real secret, participants can see it, but it stops drive-by scrapers
+ * from using the REALLMS key.
+ */
+export function studyGate(token) {
+  if (!token) return (_req, _res, next) => next();
+  const expected = Buffer.from(token);
+  return (req, res, next) => {
+    const got = Buffer.from(req.get("x-study-token") ?? "");
+    if (got.length === expected.length && timingSafeEqual(got, expected)) return next();
+    res.status(401).json({ error: "This study link is not valid. Please use the link you were given." });
+  };
+}
+
 export function createApp({ config, llm, tts }) {
   const app = express();
+  app.disable("x-powered-by");
   app.set("trust proxy", 1); // Render terminates TLS in front of us; req.ip = real client
+
+  const frameAncestors = config.security?.frameAncestors ?? "'self'";
+  app.use((_req, res, next) => {
+    res.set({
+      "Content-Security-Policy": `default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors ${frameAncestors}`,
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+    });
+    next();
+  });
+
   app.use(express.json({ limit: "100kb" }));
+
+  const gate = studyGate(config.security?.studyToken);
 
   app.post(
     "/api/chat",
-    rateLimiter({ limit: 60, windowMs: 10 * 60_000 }),
+    gate,
+    rateLimiter({ limit: 30, windowMs: 10 * 60_000 }),
     async (req, res) => {
       const { messages } = req.body ?? {};
       const invalid = validateMessages(messages);
@@ -87,6 +123,7 @@ export function createApp({ config, llm, tts }) {
 
   app.post(
     "/api/speak",
+    gate,
     rateLimiter({ limit: 600, windowMs: 10 * 60_000 }),
     async (req, res) => {
       if (tts.backend === "browser") {
@@ -135,5 +172,18 @@ export function createApp({ config, llm, tts }) {
   });
 
   app.use(express.static(PUBLIC_DIR));
+
+  // Last: JSON errors only. Express's default handler prints a stack trace
+  // (with server paths) whenever NODE_ENV is not "production", e.g. on a
+  // malformed JSON body.
+  // eslint-disable-next-line no-unused-vars
+  app.use((err, _req, res, _next) => {
+    const status = Number.isInteger(err?.status) && err.status >= 400 && err.status < 500 ? err.status : 500;
+    if (status === 500) console.error("Unhandled error:", err?.message);
+    const error =
+      status === 413 ? "Request too large." : status < 500 ? "Malformed request." : "Something went wrong on the server.";
+    res.status(status).json({ error });
+  });
+
   return app;
 }

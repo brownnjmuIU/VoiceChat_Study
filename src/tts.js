@@ -25,6 +25,8 @@ export class TtsBusyError extends Error {
 export function createTts(ttsConfig, { engine } = {}) {
   const impl = engine ?? pickEngine(ttsConfig);
   const cache = new Map(); // insertion-ordered -> cheap LRU
+  const maxBytes = ttsConfig.cacheBytes ?? Infinity;
+  let cacheBytes = 0;
   let chain = Promise.resolve();
   let pending = 0;
 
@@ -46,8 +48,16 @@ export function createTts(ttsConfig, { engine } = {}) {
     chain = job.catch(() => {}); // one failure must not poison the queue
     try {
       const wav = await job;
-      cache.set(key, wav);
-      if (cache.size > ttsConfig.cacheEntries) cache.delete(cache.keys().next().value);
+      if (!cache.has(key) && wav.length <= maxBytes) {
+        cache.set(key, wav);
+        cacheBytes += wav.length;
+      }
+      // Evict oldest until both the entry and the byte limits hold.
+      while (cache.size && (cache.size > ttsConfig.cacheEntries || cacheBytes > maxBytes)) {
+        const [oldKey, oldWav] = cache.entries().next().value;
+        cache.delete(oldKey);
+        cacheBytes -= oldWav.length;
+      }
       return { wav, cached: false };
     } finally {
       pending--;
@@ -58,7 +68,7 @@ export function createTts(ttsConfig, { engine } = {}) {
     backend: impl.name,
     /** Start loading the model now so the first participant does not wait. */
     warm: () => impl.warm?.() ?? Promise.resolve(),
-    status: () => ({ backend: impl.name, voice: ttsConfig.voice, ready: impl.ready?.() ?? true, queue: pending }),
+    status: () => ({ backend: impl.name, voice: ttsConfig.voice, ready: impl.ready?.() ?? true, queue: pending, cacheEntries: cache.size, cacheBytes }),
     synthesize,
   };
 }
