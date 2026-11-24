@@ -3,6 +3,22 @@
 // is a Render env change plus a redeploy, never a code edit.
 // -----------------------------------------------------------------------------
 
+// ONE prompt for both conditions, so text and voice participants get the same
+// words; only the reply channel differs. Neutral on purpose: it must not push
+// either the benefits or the risks, since that is what the study measures.
+// Plain spoken prose because the same reply has to sound natural read aloud.
+export const DEFAULT_SYSTEM_PROMPT =
+  "You are an assistant helping a participant in a research study understand the privacy policies of two AI " +
+  "chatbot companies, OpenAI (ChatGPT) and Anthropic (Claude). The participant has just read these policies. " +
+  "Help them understand what the policies say about how personal information and conversation data are " +
+  "collected, used, stored, shared and protected, and what choices users have. Explain both the benefits and " +
+  "the risks of sharing personal information with a chatbot in a balanced, even-handed way; do not try to " +
+  "persuade the participant either way. When policy text is provided below, base your answers on it and say " +
+  "so when the policy does not cover something; do not invent policy details. " +
+  "Answer in plain conversational prose, as if speaking. Do not use markdown, bullet points, numbered lists, " +
+  "tables, headings, links, code blocks or emoji. Keep answers under about 120 words unless the participant " +
+  "asks for more.";
+
 const TTS_BACKENDS = ["browser", "kokoro", "openai", "mock"];
 const MODES = ["text", "voice"];
 
@@ -32,7 +48,7 @@ export function loadConfig(env = process.env) {
     baseURL: env.LLM_BASE_URL,
     apiKey: env.LLM_API_KEY,
     model: env.LLM_MODEL ?? (llmMock ? "mock" : undefined),
-    timeoutMs: num(env.LLM_TIMEOUT_MS, 60_000),
+    timeoutMs: num(env.LLM_TIMEOUT_MS, 45_000),
     // Always capped: the endpoint is public, so an uncapped reply is an open
     // tab on the REALLMS key. Leaves room for gpt-oss reasoning tokens.
     maxTokens: num(env.LLM_MAX_TOKENS, 1024),
@@ -40,7 +56,9 @@ export function loadConfig(env = process.env) {
     reasoningEffort: env.LLM_REASONING_EFFORT || undefined,
   };
   if (!llm.mock) {
-    for (const k of ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"]) {
+    // STUDY_TOKEN is required with a real LLM: without it /api/chat is an open
+    // proxy to the REALLMS key for anyone who finds the URL.
+    for (const k of ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "STUDY_TOKEN"]) {
       if (!env[k]) problems.push(`${k} is required (or set LLM_MOCK=1 for local dev)`);
     }
   }
@@ -82,6 +100,31 @@ export function loadConfig(env = process.env) {
   const defaultMode = (env.DEFAULT_MODE ?? "voice").toLowerCase();
   if (!MODES.includes(defaultMode)) problems.push(`DEFAULT_MODE must be text or voice`);
 
+  // Study data store. REQUIRED unless explicitly turned off, so a deploy that
+  // forgot the Supabase vars fails at boot instead of silently saving nothing.
+  // Mock LLM (local dev/tests) defaults to no database unless one is given.
+  const storeDisabled = bool(env.STORE_DISABLED, false) || (llmMock && !env.SUPABASE_URL);
+  const store = {
+    enabled: !storeDisabled,
+    url: env.SUPABASE_URL,
+    key: env.SUPABASE_SERVICE_KEY,
+    timeoutMs: num(env.SUPABASE_TIMEOUT_MS, 5000),
+    // Ping the database on this interval (hours, 0 = off). Proves it is awake in
+    // the logs and keeps a Free-plan project from pausing while this server runs.
+    keepAliveHours: num(env.SUPABASE_KEEPALIVE_HOURS, 6),
+  };
+  if (store.enabled) {
+    for (const k of ["SUPABASE_URL", "SUPABASE_SERVICE_KEY"]) {
+      if (!env[k]) problems.push(`${k} is required (or set STORE_DISABLED=1 for local dev without a database)`);
+    }
+  }
+
+  // Qualtrics origins allowed to receive usage counts via postMessage.
+  const parentOrigins = String(env.PARENT_ORIGINS ?? "https://iu.co1.qualtrics.com")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
   if (problems.length) {
     const err = new Error(`Invalid configuration:\n  - ${problems.join("\n  - ")}`);
     err.problems = problems;
@@ -91,27 +134,35 @@ export function loadConfig(env = process.env) {
   return {
     port: num(env.PORT, 3000),
     security: {
-      // Optional shared token carried in the study link (?k=...). Empty = off.
+      // Shared token carried in the study link (?k=...). Required with a real
+      // LLM (see above); may be empty only with LLM_MOCK=1 for local dev.
       studyToken: env.STUDY_TOKEN ?? "",
       // Who may embed the page in an iframe (CSP frame-ancestors).
       frameAncestors: env.FRAME_ANCESTORS ?? "'self' https://*.qualtrics.com",
     },
     llm,
     tts,
+    store,
+    // Render sets RENDER_GIT_COMMIT; stored on every participant row so data can
+    // always be traced to the exact code that produced it.
+    appVersion: (env.APP_VERSION || env.RENDER_GIT_COMMIT || "dev").slice(0, 12),
+    study: {
+      // Whole conversations are kept and logged; only the most recent messages
+      // are sent to the model, so a long 10-minute chat never hits a hard limit.
+      maxHistory: num(env.MAX_HISTORY_MESSAGES, 200),
+      contextMessages: num(env.LLM_CONTEXT_MESSAGES, 40),
+      policyDir: env.POLICY_DIR ?? "./policies",
+    },
     ui: {
       defaultMode,
       // In voice mode, hide the words by default so the manipulation is
       // "heard, not read". ?transcript=1 overrides per page load.
       showTranscript: bool(env.SHOW_TRANSCRIPT, false),
       title: env.CHAT_TITLE ?? "Assistant",
+      // "New chat" wipes the visible history mid-study, which muddies the data.
+      showReset: bool(env.SHOW_RESET, false),
+      parentOrigins,
     },
-    systemPrompt:
-      env.SYSTEM_PROMPT ??
-      // ONE prompt for both conditions, so text and voice participants get the
-      // same words. Plain spoken prose because the same reply has to sound
-      // natural read aloud: no markdown, lists, tables, links or emoji.
-      "You are a helpful assistant. Answer in plain conversational prose, as if speaking. " +
-        "Do not use markdown, bullet points, numbered lists, tables, headings, links, code blocks or emoji. " +
-        "Keep answers under about 150 words unless the user asks for more.",
+    systemPrompt: env.SYSTEM_PROMPT ?? DEFAULT_SYSTEM_PROMPT,
   };
 }

@@ -3,10 +3,9 @@ services:
   - type: web
     name: voice-chat
     runtime: node
-    # Start on free to measure memory (boot log prints "rss N MB" after Kokoro
-    # loads). If the service gets OOM-killed, move to "standard" (2 GB, $25/mo).
-    # "starter" ($7) has the same 512 MB as free, so it does not fix memory.
-    plan: free
+    # Always-on ($7/mo). Free sleeps when idle, so the first participant after a
+    # quiet spell waits 30-60 s. With Kokoro, use standard (2 GB) instead.
+    plan: starter
     # Browser voice needs no model, so the build is just npm ci.
     # TO SWITCH BACK TO KOKORO: set TTS_BACKEND=kokoro below AND change this to
     #   npm ci && npm run prefetch-model
@@ -22,7 +21,7 @@ services:
         value: "22"
       - key: NODE_ENV
         value: production # Render does not set this; without it Express leaks stack traces
-      # Optional: set in the dashboard, then hand out links as https://<app>/?mode=voice&k=<token>
+      # Required: set in the dashboard, then hand out links as https://<app>/?mode=voice&k=<token>
       - key: STUDY_TOKEN
         sync: false
       - key: LLM_MAX_TOKENS
@@ -45,3 +44,11 @@ services:
         value: af_heart
       - key: DEFAULT_MODE
         value: voice
+      # --- Study data (Supabase project for THIS study only) ---
+      - key: SUPABASE_URL
+        sync: false # https://<project>.supabase.co
+      - key: SUPABASE_SERVICE_KEY
+        sync: false # service_role / secret key; server-side only, never in git
+      # Qualtrics origin(s) allowed to receive usage counts (comma-separated)
+      - key: PARENT_ORIGINS
+        value: https://iu.co1.qualtrics.com

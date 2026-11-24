@@ -14,7 +14,7 @@ const reset = $("reset");
 const empty = $("empty");
 
 const params = new URLSearchParams(location.search);
-// Study link token (?k=...). Only enforced when the server sets STUDY_TOKEN.
+// Study link token (?k=...). The server requires it with a real LLM (only LLM_MOCK=1 skips it).
 const apiHeaders = { "Content-Type": "application/json", ...(params.get("k") && { "X-Study-Token": params.get("k") }) };
 const serverConfig = await fetch("/api/config")
   .then((r) => r.json())
@@ -26,16 +26,115 @@ const showTranscript = params.has("transcript") ? params.get("transcript") === "
 document.title = serverConfig.title;
 $("title").textContent = serverConfig.title;
 document.body.dataset.mode = mode;
+if (!serverConfig.showReset) reset.hidden = true;
+
+// --- Study identity ----------------------------------------------------------
+// rid = Qualtrics ResponseID (from qualtrics/question.js). Missing outside
+// Qualtrics; the server stores those rows under "no-rid".
+const newId = () =>
+  crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+const identity = {
+  rid: params.get("rid") ?? "",
+  sessionId: newId(),
+  condition: mode,
+  ...(params.get("k") && { k: params.get("k") }),
+};
+const embedded = window.parent !== window;
+
+// Parent page (Qualtrics) to report usage counts to. Only origins the server
+// allows; counts only, never message text.
+const parentOrigin = (() => {
+  const po = params.get("po");
+  return po && (serverConfig.parentOrigins ?? []).includes(po) ? po : null;
+})();
 
 // "browser" = the device's own speechSynthesis voice (instant, no server work).
 // Anything else = WAV clips fetched from /api/speak (Kokoro, OpenAI-compatible).
 const useBrowserVoice = serverConfig.ttsBackend === "browser";
 
-// Small, inspectable event trail (window.voiceChat.events). Nothing is sent
-// anywhere; it exists so a later Qualtrics embed can read play/replay counts.
+// --- Event log -----------------------------------------------------------------
+// Every UI event gets a sequence number and is sent to /api/events in batches
+// (every few seconds, and with sendBeacon when the page is hidden or closed).
+// window.voiceChat.events keeps a local copy for debugging.
 const events = [];
-const track = (type, detail = {}) => events.push({ type, t: Date.now(), ...detail });
-window.voiceChat = { mode, showTranscript, backend: serverConfig.ttsBackend ?? "unknown", events };
+const outbox = [];
+let seq = 0;
+const stats = { turns: 0, replays: 0, stops: 0, unsaved: 0 };
+
+function track(type, detail = {}) {
+  const e = { seq: seq++, type, t: Date.now(), detail };
+  events.push(e);
+  outbox.push(e);
+  if (type === "audio_replay" || type === "audio_stop") {
+    stats[type === "audio_replay" ? "replays" : "stops"]++;
+    reportToParent();
+  }
+}
+
+let flushing = false;
+async function flushEvents() {
+  if (flushing || !outbox.length) return;
+  flushing = true;
+  const batch = outbox.splice(0, 100);
+  try {
+    const res = await fetch("/api/events", {
+      method: "POST",
+      headers: apiHeaders,
+      body: JSON.stringify({ ...identity, events: batch }),
+    });
+    if (!res.ok && res.status >= 500) throw new Error(String(res.status));
+  } catch {
+    outbox.unshift(...batch); // try again next tick; seq makes it idempotent
+  } finally {
+    flushing = false;
+  }
+}
+setInterval(flushEvents, 4000);
+
+function beaconEvents() {
+  if (!outbox.length) return;
+  const batch = outbox.splice(0, 100);
+  const blob = new Blob([JSON.stringify({ ...identity, events: batch })], { type: "application/json" });
+  if (!navigator.sendBeacon?.("/api/events", blob)) outbox.unshift(...batch);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    track("visibility_hidden");
+    beaconEvents();
+  } else track("visibility_visible");
+});
+window.addEventListener("pagehide", () => {
+  track("page_hide");
+  beaconEvents();
+});
+
+/** Usage counts -> Qualtrics embedded data (see qualtrics/question.js). */
+function reportToParent() {
+  if (!parentOrigin) return;
+  window.parent.postMessage(
+    { source: "voice-text-study", type: "stats", condition: mode, sessionId: identity.sessionId, ...stats },
+    parentOrigin,
+  );
+}
+
+window.voiceChat = { mode, showTranscript, backend: serverConfig.ttsBackend ?? "unknown", identity, events, stats };
+
+// One participants row per page load. Retried quietly; the chat works either way.
+(async function registerSession(attempt = 0) {
+  try {
+    const res = await fetch("/api/session", {
+      method: "POST",
+      headers: apiHeaders,
+      body: JSON.stringify({ ...identity, embedded, showTranscript: mode === "voice" && showTranscript }),
+    });
+    if (!res.ok && res.status >= 500) throw new Error(String(res.status));
+  } catch {
+    if (attempt < 3) setTimeout(() => registerSession(attempt + 1), 3000 * (attempt + 1));
+  }
+})();
+track("page_load", { embedded, showTranscript: mode === "voice" && showTranscript, ua: navigator.userAgent.slice(0, 200) });
+reportToParent();
 
 let messages = [];
 let busy = false;
@@ -334,23 +433,29 @@ form.addEventListener("submit", async (e) => {
   log.appendChild(pending);
   log.scrollTop = log.scrollHeight;
 
+  // Long answers from REALLMS can take ~30 s. Say so, so it never looks frozen.
+  const slowTimer = setTimeout(() => {
+    pending.textContent = "Still thinking. Longer answers can take up to 30 seconds…";
+    track("slow_reply");
+  }, 12_000);
+
   try {
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: apiHeaders,
-      body: JSON.stringify({ messages }),
-    });
-    const data = await res.json().catch(() => ({}));
+    const { res, data } = await postChat(messages);
+    clearTimeout(slowTimer);
     pending.remove();
 
     if (!res.ok) {
+      track("reply_error", { status: res.status });
       addBubble("error", data.error ?? `Request failed (${res.status}).`);
       messages.pop(); // so a retry does not resend a broken history
       return;
     }
 
     messages.push({ role: "assistant", content: data.reply });
-    track("reply", { chars: data.reply.length, chunks: data.chunks?.length ?? 0 });
+    stats.turns++;
+    if (data.saved === false) stats.unsaved++;
+    track("reply", { chars: data.reply.length, chunks: data.chunks?.length ?? 0, saved: data.saved });
+    reportToParent();
 
     if (mode === "voice" && data.chunks?.length) {
       addVoiceBubble(data.reply, data.chunks).autoplay();
@@ -358,10 +463,39 @@ form.addEventListener("submit", async (e) => {
       addBubble("assistant", data.reply);
     }
   } catch {
+    clearTimeout(slowTimer);
     pending.remove();
-    addBubble("error", "Could not reach the server. Check your connection and try again.");
+    track("reply_error", { status: 0 });
+    addBubble("error", "Could not reach the assistant. Check your connection and send your message again.");
     messages.pop();
   } finally {
     setBusy(false);
+    flushEvents();
   }
 });
+
+/**
+ * POST /api/chat with a timeout, retrying ONCE on a network error or a 502/503/504.
+ * The same clientMsgId is reused, so the server stores the turn at most once.
+ */
+async function postChat(history) {
+  const clientMsgId = newId();
+  const attempt = async () => {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: apiHeaders,
+      body: JSON.stringify({ ...identity, clientMsgId, messages: history }),
+      signal: AbortSignal.timeout?.(100_000),
+    });
+    return { res, data: await res.json().catch(() => ({})) };
+  };
+  try {
+    const r = await attempt();
+    if (![502, 503, 504].includes(r.res.status)) return r;
+  } catch {
+    /* network error or timeout: fall through to one retry */
+  }
+  track("retry");
+  await new Promise((r) => setTimeout(r, 2000));
+  return attempt();
+}

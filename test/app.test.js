@@ -16,11 +16,12 @@ before(async () => {
 });
 after(() => server.close());
 
+const ident = { sessionId: "sess-1", condition: "voice", rid: "R_test123456", clientMsgId: "m-1" };
 const post = (path, body) =>
   fetch(base + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 test("chat returns the reply and speakable chunks", async () => {
-  const res = await post("/api/chat", { messages: [{ role: "user", content: "Should I share my location?" }] });
+  const res = await post("/api/chat", { ...ident, messages: [{ role: "user", content: "Should I share my location?" }] });
   assert.equal(res.status, 200);
   const data = await res.json();
   assert.match(data.reply, /mock reply/);
@@ -30,7 +31,12 @@ test("chat returns the reply and speakable chunks", async () => {
 
 test("chat validates input", async () => {
   assert.equal((await post("/api/chat", {})).status, 400);
-  assert.equal((await post("/api/chat", { messages: [{ role: "system", content: "x" }] })).status, 400);
+  assert.equal((await post("/api/chat", { ...ident, messages: [{ role: "system", content: "x" }] })).status, 400);
+  // identity is required on every chat call
+  const msgs = [{ role: "user", content: "hi" }];
+  assert.equal((await post("/api/chat", { ...ident, sessionId: undefined, messages: msgs })).status, 400);
+  assert.equal((await post("/api/chat", { ...ident, condition: "video", messages: msgs })).status, 400);
+  assert.equal((await post("/api/chat", { ...ident, clientMsgId: "bad id!", messages: msgs })).status, 400);
   assert.match(validateMessages([{ role: "assistant", content: "hi" }]), /last message/);
 });
 
@@ -70,7 +76,7 @@ test("study token gate, when configured", async () => {
   const srv = app.listen(0);
   await new Promise((r) => srv.once("listening", r));
   const url = `http://127.0.0.1:${srv.address().port}`;
-  const body = JSON.stringify({ messages: [{ role: "user", content: "hi" }] });
+  const body = JSON.stringify({ ...ident, messages: [{ role: "user", content: "hi" }] });
   const chat = (headers) => fetch(url + "/api/chat", { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body });
   try {
     assert.equal((await chat({})).status, 401);
@@ -127,7 +133,7 @@ test("browser backend: server makes no audio and tells the page to speak", async
     // chat still returns the sentence chunks the browser will speak
     const chat = await fetch(url + "/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+      body: JSON.stringify({ ...ident, messages: [{ role: "user", content: "hi" }] }),
     });
     assert.ok((await chat.json()).chunks.length >= 2);
   } finally { srv.close(); }

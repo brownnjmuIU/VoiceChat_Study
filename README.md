@@ -1,73 +1,81 @@
-# voice-chat
+# voice-text-study
 
-Text-in, voice-out chatbot for the **text vs voice privacy-disclosure study** (Week 10). Users type; the assistant answers either in text or out loud. Same model, same prompt, same words in both conditions. Only the reply channel changes.
+Voice vs text chatbot for Nick Brown's **privacy-policy study** (Weeks 11–12). Participants read the OpenAI and Anthropic privacy policies in Qualtrics, then ask a chatbot to help them interpret them. Qualtrics randomly assigns each participant to one condition:
 
-```
-Browser ──typed message──▶ /api/chat ──▶ IU REALLMS (gpt-oss-120b)
-   │                           │ reply + sentence chunks
-   ▼                           ▼
- speaks each sentence with the device's own voice (default: TTS_BACKEND=browser)
-
- or, TTS_BACKEND=kokoro:  WAV per sentence ◀── /api/speak ──▶ Kokoro-82M (inside this server)
-```
-
-## Conditions
-
-| URL | What the participant gets |
+| Condition | What the participant gets |
 |---|---|
-| `/?mode=text` | Reply shown as words (the Week 2 chatbot) |
-| `/?mode=voice` | Reply spoken aloud, words hidden; play/stop/replay button |
-| `/?mode=voice&transcript=1` | Spoken **and** shown as words |
+| `text` | The reply is shown as words |
+| `voice` | The same reply is spoken aloud with the words hidden, plus a play/stop/replay button |
 
-`DEFAULT_MODE` and `SHOW_TRANSCRIPT` set the defaults when the URL says nothing.
+The model, the prompt and the words are the same in both conditions. Only the reply channel changes. The hypothesis is that voice calms risk perceptions more than text.
 
-## Run locally
+Built on the Week 10 `voice-chat` app. This round adds **reliable data storage**: every turn and UI event is saved to Supabase and keyed by the Qualtrics ResponseID.
 
-```bash
-npm install
-cp .env.example .env      # add your REALLMS key to LLM_API_KEY
-npm start                 # http://localhost:3000/?mode=voice
+```
+Qualtrics question (qualtrics/question.js)
+   │ iframe: ?mode=<Condition>&rid=<ResponseID>&k=<STUDY_TOKEN>
+   ▼
+This app (Render) ──▶ IU REALLMS (gpt-oss-120b)          text replies
+   │                  browser speechSynthesis            voice (default)
+   ├──▶ Supabase: participants, chat_turns, client_events  (study data)
+   └──▶ postMessage counts ──▶ Qualtrics embedded data    (export columns)
 ```
 
-The default voice is the browser's own, so there is no model to download. For Kokoro, set `TTS_BACKEND=kokoro` and run `npm run prefetch-model` once (~90 MB).
+## What gets stored
 
-No key handy? `LLM_MOCK=1 npm start` runs the whole UI with a canned reply.
+| Table | One row per | Key columns |
+|---|---|---|
+| `participants` | page load (reloads show as extra rows) | response_id, session_id, condition, in_qualtrics, user_agent, app_version |
+| `chat_turns` | message: `user`, `assistant`, or `error` (model failed; what they typed is still kept) | response_id, turn_index, role, content, latency_ms |
+| `client_events` | UI event: voice_used, audio_start/replay/stop/end, send, reply, retry, slow_reply, tab hidden | response_id, seq, type, detail |
+
+Views for analysis: `transcript_export` gives the readable transcript in order. `participant_summary` gives one row per participant with message counts, chat duration, replays, tab-hides and the voice used. Join both to the Qualtrics export on `response_id`.
+
+
+Known limit: the retry queue lives in memory. Rows still queued when the server restarts are lost. Healthy is `queued: 0`.
+
+If Supabase rejects a row permanently (a 4xx other than 408/429), the row is dropped and the server log records only the HTTP status, table and row count. **Participant messages never go to the logs.**
+
+## Access and abuse limits
+
+The app URL is public, and every `/api/chat` call spends the IU REALLMS key, so:
+
+- **`STUDY_TOKEN` is required.** With a real LLM, the server refuses to boot without it. `/api/chat` and `/api/speak` reject any request without the token (401, "This study link is not valid"). The Qualtrics question passes it to the app as `?k=<token>`, so **set the same value on Render and in `qualtrics/question.js`.** Only `LLM_MOCK=1` runs without a token.
+- **What the model sees.** The browser sends the conversation history with each message. The server keeps only `role` and `content` from each message (the request cannot set the system prompt or model settings). It sends the most recent 40 messages (`LLM_CONTEXT_MESSAGES`), and drops the oldest of those until they total no more than 40,000 characters. The newest message is always sent.
+- **What gets stored.** Each request stores the newest user message and the reply. The earlier history the browser sends is not stored again, because those turns were already saved when they happened.
+- **Rate limits.** 60 chat requests per session and 1,500 per IP per 10 minutes. The per-IP limit is generous because a campus lab puts many participants behind one address. Replies are capped at `LLM_MAX_TOKENS` (1024).
+
+## Setup
+
+1. **Supabase:** create a new project for this study only. In the SQL Editor, run `sql/schema.sql`. Under Settings > API, copy the Project URL and the `service_role` (secret) key.
+2. **Policies:** put the exact policy text participants read into `policies/openai.md` and `policies/anthropic.md` (see `policies/README.md`).
+3. **Local:**
+   ```bash
+   npm install
+   cp .env.example .env    # fill LLM_API_KEY, STUDY_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_KEY
+   npm start               # http://localhost:3000/?mode=voice&rid=R_localtest01&k=<STUDY_TOKEN>
+   ```
+   With no keys: `LLM_MOCK=1 npm start` (canned replies, nothing saved, no token needed).
+4. **Render:** use **New > Blueprint** on the repo. Set `LLM_API_KEY`, `STUDY_TOKEN`, `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` in the dashboard. For `STUDY_TOKEN`, use a long random string, e.g. `node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"`. Check `/healthz` (`store.ok: true`) and `/healthz/db` (200).
+5. **Qualtrics:** see `SURVEY_SETUP.md`. Put the same `STUDY_TOKEN` value in `qualtrics/question.js`.
+
+`npm test` runs 50 offline tests (no network, no database).
 
 ## Voice backends
 
-| `TTS_BACKEND` | Where the audio comes from | Notes |
-|---|---|---|
-| `browser` (default) | The participant's device (`speechSynthesis`) | Instant, free, no server load. **Voice differs per device and browser**, a study confound. Pin one with `TTS_BROWSER_VOICE`; the page logs the voice used as a `voice_used` event. Some voices (Edge "Online/Natural", Chrome "Google") are cloud voices, so text may leave the device. |
-| `kokoro` | Kokoro-82M inside this server | Same voice for everyone, text stays on our server. Measured ~1.3-4x slower than real time on a laptop CPU, so it pauses between sentences; needs more CPU (or a GPU host). Run `npm run prefetch-model` first. |
-| `openai` | Any OpenAI-compatible `/v1/audio/speech` server | OpenAI itself, or Kokoro-FastAPI on IU hardware. |
-| `mock` | A beep | Tests and UI work. |
-
-Switching is one env var (plus the build command on Render, see `render.yaml`).
-
-`npm test` runs 23 offline tests (no network, no model).
-
-## Deploy on Render
-
-1. Push this folder to its own GitHub repo.
-2. Render: **New > Blueprint**, pick the repo. `render.yaml` sets the build (`npm ci`), start, health check and env. For Kokoro, also change the build to `npm ci && npm run prefetch-model` (comment in the file).
-3. Set `LLM_API_KEY` in the dashboard (it is marked `sync: false`, never in git).
-4. Check `https://<service>.onrender.com/healthz`: `tts.backend` shows which voice is active (with Kokoro, `tts.ready` flips to `true` once it has loaded).
-
-**Kokoro only, memory:** the boot log prints `Kokoro q8 loaded in N ms, rss N MB`. Free and Starter both have 512 MB. If the service restarts with an out-of-memory error, move to Standard (2 GB) or set `KOKORO_DTYPE=q4`.
-
-## Moving the voice to IU later
-
-`TTS_BACKEND=openai` + `TTS_BASE_URL` points at any OpenAI-compatible `/v1/audio/speech` server. [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) serves the same Kokoro model that way from a Docker image, so if UITS hosts it next to REALLMS the switch is an env change, and participants hear the same voice.
+Unchanged from Week 10. `TTS_BACKEND=browser` (default) uses the participant's device voice. It is instant, but the **voice differs per device**, so each session logs a `voice_used` event and the voice name appears in `participant_summary`. `kokoro` gives everyone the same voice but runs slower than real time on Render CPUs. `openai` works with any OpenAI-compatible `/v1/audio/speech` server, for example Kokoro-FastAPI on IU hardware.
 
 ## Files
 
 | Path | Role |
 |---|---|
-| `server.js` | Boot: config, LLM, TTS, start listening, warm the model |
-| `src/config.js` | All env vars, validated at boot |
-| `src/llm.js` | REALLMS client (OpenAI-compatible) + mock |
-| `src/tts.js` | browser (no-op) / kokoro / openai / mock backends, one-at-a-time queue, LRU cache |
-| `src/speech-text.js` | Strip markdown, split reply into sentence chunks |
-| `src/app.js` | Routes: `/api/chat`, `/api/speak`, `/api/config`, `/healthz` |
-| `public/` | Chat page; `window.voiceChat.events` records send/reply/play/replay/stop |
-| `scripts/prefetch-model.js` | Downloads the model at build time |
+| `server.js` | Boot: config, policies to prompt, LLM, TTS, store, database ping and keep-alive |
+| `src/config.js` | All env vars, validated at boot; the default (neutral) system prompt |
+| `src/app.js` | Routes: `/api/session`, `/api/chat`, `/api/events`, `/api/speak`, `/api/config`, `/healthz`, `/healthz/db` |
+| `src/store.js` | Supabase writer: idempotent inserts, retry queue, status |
+| `src/ids.js` | ResponseID / session / condition validation |
+| `src/policy.js` | Loads `policies/*.md` into the system prompt |
+| `src/llm.js`, `src/tts.js`, `src/speech-text.js` | REALLMS client, voice backends, speech chunking |
+| `public/` | Chat page: identity, event batching, retry, slow notice, counts to Qualtrics |
+| `qualtrics/question.js` | Paste into the Qualtrics chatbot question |
+| `sql/schema.sql` | Tables, RLS, export views |

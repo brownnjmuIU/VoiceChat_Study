@@ -2,8 +2,30 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadConfig } from "../src/config.js";
 
-test("real LLM requires all three vars, reported together", () => {
-  assert.throws(() => loadConfig({}), (e) => e.problems.length === 3);
+test("real deploy requires LLM, study token and Supabase vars, reported together", () => {
+  assert.throws(
+    () => loadConfig({}),
+    (e) => e.problems.length === 6 && e.problems.some((p) => /SUPABASE_SERVICE_KEY/.test(p)) && e.problems.some((p) => /STUDY_TOKEN/.test(p)),
+  );
+});
+
+test("store can only be off on purpose", () => {
+  const real = { LLM_BASE_URL: "https://x/v1", LLM_API_KEY: "k", LLM_MODEL: "m", STUDY_TOKEN: "t" };
+  assert.throws(() => loadConfig(real), /SUPABASE_URL/);
+  assert.equal(loadConfig({ ...real, STORE_DISABLED: "1" }).store.enabled, false);
+  const c = loadConfig({ ...real, SUPABASE_URL: "https://p.supabase.co", SUPABASE_SERVICE_KEY: "s" });
+  assert.equal(c.store.enabled, true);
+  assert.equal(loadConfig({ LLM_MOCK: "1" }).store.enabled, false);
+});
+
+test("study defaults: long chats allowed, reset hidden, Qualtrics origin allowed", () => {
+  const c = loadConfig({ LLM_MOCK: "1" });
+  assert.equal(c.study.maxHistory, 200);
+  assert.equal(c.study.contextMessages, 40);
+  assert.equal(c.ui.showReset, false);
+  assert.deepEqual(c.ui.parentOrigins, ["https://iu.co1.qualtrics.com"]);
+  assert.match(c.systemPrompt, /privacy policies/);
+  assert.match(c.systemPrompt, /balanced/);
 });
 
 test("mock LLM + defaults boot", () => {

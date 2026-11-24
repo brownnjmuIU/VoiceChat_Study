@@ -1,10 +1,12 @@
 {
-  "name": "voice-chat",
+  "name": "voice-text-study",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Text-in, voice-out chatbot for the text vs voice privacy-disclosure study. Browser -> this server -> IU REALLMS (text) and a self-hosted Kokoro model (speech).",
-  "engines": { "node": ">=20" },
+  "description": "Voice vs text privacy-policy chatbot study (Weeks 11-12). Qualtrics iframe -> this server -> IU REALLMS; every turn and UI event stored in Supabase, keyed by Qualtrics ResponseID.",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
