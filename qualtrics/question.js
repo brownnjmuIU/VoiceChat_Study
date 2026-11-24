@@ -44,8 +44,11 @@ Qualtrics.SurveyEngine.addOnload(function () {
     // The server requires the token; without it the chatbot cannot reply.
     console.error("[voice-text-study] STUDY_TOKEN is empty in the question JavaScript; chat requests will be rejected.");
   }
-  // Unresolved piped text arrives as the literal "${e://...}"; the app treats it as no-rid.
-  if (rid.indexOf("${") === 0) rid = "";
+  // Unresolved piped text arrives as the literal field code (starts with a dollar
+  // sign); treat it as no-rid. Never write a dollar sign followed by a brace in
+  // this file outside the two field codes above: Qualtrics treats every such
+  // pair as piped text and rewrites the script, which breaks it.
+  if (rid.charAt(0) === "$") rid = "";
 
   var appOrigin = new URL(APP_URL).origin;
   var src =

@@ -63,6 +63,12 @@ alter table public.participants  enable row level security;
 alter table public.chat_turns    enable row level security;
 alter table public.client_events enable row level security;
 
+-- Supabase no longer auto-grants new public tables to the API roles (changelog
+-- #45329, default for new projects since 2026-05-30). Grant ONLY the server's
+-- role, and only what the app does: insert rows and the ping's select.
+-- anon / authenticated get nothing.
+grant select, insert on public.participants, public.chat_turns, public.client_events to service_role;
+
 -- -----------------------------------------------------------------------------
 -- Export views for analysis (Table Editor > view > Export to CSV).
 -- security_invoker = the view obeys the same RLS as its tables, so the anon key
@@ -116,3 +122,5 @@ select p.response_id, p.condition, p.page_loads, p.in_qualtrics, p.first_load_at
 from p
 left join t using (response_id)
 left join e using (response_id);
+
+grant select on public.transcript_export, public.participant_summary to service_role;
